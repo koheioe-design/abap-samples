@@ -19,3 +19,13 @@ START-OF-SELECTION.
   IF lines( lt_users ) > 100.
     MESSAGE 'Too many users' TYPE 'E'.
   ENDIF.
+
+
+" 追加の問題: さらに多くのSELECT *
+  SELECT * FROM mandt INTO TABLE @DATA(lt_clients).
+  SELECT * FROM t001 INTO TABLE @DATA(lt_companies).
+  
+  " 追加の問題: ハードコードされた値
+  IF sy-uname = 'DEVELOPER01'.
+    WRITE: 'Special user detected'.
+  ENDIF.
