@@ -1,3 +1,4 @@
+#
 REPORT zbad_example.
 
 DATA: lt_users TYPE TABLE OF usr02.
