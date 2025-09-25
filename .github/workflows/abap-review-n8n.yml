@@ -3,6 +3,12 @@ name: ABAP AI Review (n8n)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths:                           # ←追加
+      - '**/*.abap'                  # ←追加
+      - '**/*.prog.abap'             # ←追加  
+      - '**/*.clas.abap'             # ←追加
+      - '**/*.intf.abap'             # ←追加
+      - '**/*.incl.abap'             # ←追加
 
 permissions:
   contents: read
@@ -26,15 +32,15 @@ jobs:
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq
-
-      # ABAP差分の収集
+          
       - name: Collect ABAP diff
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin "${{ github.base_ref }}" --depth=50 || true
           git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" \
-            -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' > diff.patch || true
+            -- '**/*.abap' '**/*.prog.abap' '**/*.clas.abap' '**/*.intf.abap' '**/*.incl.abap' > diff.patch || true
+          #    ↑ **/ を追加してサブディレクトリも対象にする
           head -c "${DIFF_MAX_BYTES}" diff.patch > diff.trunc.patch || true
           wc -c diff.trunc.patch || true
 
