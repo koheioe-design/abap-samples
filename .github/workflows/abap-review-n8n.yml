@@ -1,0 +1,112 @@
+name: ABAP AI Review (n8n)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  DIFF_MAX_BYTES: "120000"
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      # ABAP差分の収集
+      - name: Collect ABAP diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref }}" --depth=50 || true
+          git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" \
+            -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' > diff.patch || true
+          head -c "${DIFF_MAX_BYTES}" diff.patch > diff.trunc.patch || true
+          wc -c diff.trunc.patch || true
+
+      - name: Skip if no diff
+        id: guard
+        shell: bash
+        run: |
+          if [ ! -s diff.trunc.patch ]; then
+            echo "No ABAP diff. Skipping review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Call n8n Webhook
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # n8n Webhook URLの確認
+          [ -n "${N8N_WEBHOOK_URL:-}" ] || { echo "ERROR: N8N_WEBHOOK_URL is empty."; exit 1; }
+
+          # リクエストボディの作成
+          BODY=$(jq -n \
+            --arg diff  "$(cat diff.trunc.patch | base64 -w 0)" \
+            --arg repo  "${{ github.repository }}" \
+            --arg pr    "${{ github.event.number }}" \
+            --arg author "${{ github.actor }}" \
+            --arg title  "${{ github.event.pull_request.title }}" \
+            --arg body   "${{ github.event.pull_request.body }}" \
+            '{
+               repository: $repo,
+               pull_request: ($pr|tonumber),
+               diff: $diff,
+               author: $author,
+               title: $title,
+               body: $body,
+               changed_files: []
+             }')
+
+          # n8nへのリクエスト送信
+          RESP=$(curl -sS -L -w "\n%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$N8N_WEBHOOK_URL" || true)
+
+          HTTP_CODE=$(echo "$RESP" | tail -n1)
+          RESPONSE=$(echo "$RESP" | sed '$d')
+          
+          # レスポンスの確認
+          if ! echo "$HTTP_CODE" | grep -qE '^2[0-9][0-9]$'; then
+            echo "n8n webhook error (HTTP $HTTP_CODE):"
+            echo "$RESPONSE"
+            exit 1
+          else
+            echo "n8n webhook succeeded (HTTP $HTTP_CODE)"
+            echo "$RESPONSE"
+          fi
+
+      # 成功時のサマリー
+      - name: Add summary
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          {
+            echo "### ✅ ABAP AI Review Completed"
+            echo
+            echo "- **Repository**: ${{ github.repository }}"
+            echo "- **PR**: #${{ github.event.number }}"
+            echo "- **Author**: ${{ github.actor }}"
+            echo "- **Review System**: n8n + Gemini AI"
+            echo
+            echo "レビューコメントがPRに投稿されました。"
+          } >> "$GITHUB_STEP_SUMMARY"
