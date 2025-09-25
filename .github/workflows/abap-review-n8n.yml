@@ -60,7 +60,7 @@ jobs:
 
           # リクエストボディの作成
           BODY=$(jq -n \
-            --arg diff  "$(cat diff.trunc.patch | base64 -w 0)" \
+            --arg diff  "$(cat diff.trunc.patch)" \
             --arg repo  "${{ github.repository }}" \
             --arg pr    "${{ github.event.number }}" \
             --arg author "${{ github.actor }}" \
