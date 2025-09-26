@@ -1,124 +1,4 @@
-# name: ABAP AI Review (n8n)
-
-# on:
-#   pull_request:
-#     types: [opened, synchronize, reopened]
-#     paths:                           # ←追加
-#       - '**/*.abap'                  # ←追加
-#       - '**/*.prog.abap'             # ←追加  
-#       - '**/*.clas.abap'             # ←追加
-#       - '**/*.intf.abap'             # ←追加
-#       - '**/*.incl.abap'             # ←追加
-
-# permissions:
-#   contents: read
-#   pull-requests: write
-#   issues: write
-
-# env:
-#   DIFF_MAX_BYTES: "120000"
-
-# jobs:
-#   review:
-#     runs-on: ubuntu-latest
-
-#     steps:
-#       - uses: actions/checkout@v4
-#         with:
-#           fetch-depth: 0
-
-#       - name: Setup jq
-#         run: |
-#           set -euo pipefail
-#           sudo apt-get update -y
-#           sudo apt-get install -y jq
-          
-#       - name: Collect ABAP diff
-#         shell: bash
-#         run: |
-#           set -euo pipefail
-#           git fetch origin "${{ github.base_ref }}" --depth=50 || true
-#           git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" \
-#             -- '**/*.abap' '**/*.prog.abap' '**/*.clas.abap' '**/*.intf.abap' '**/*.incl.abap' > diff.patch || true
-#           #    ↑ **/ を追加してサブディレクトリも対象にする
-#           head -c "${DIFF_MAX_BYTES}" diff.patch > diff.trunc.patch || true
-#           wc -c diff.trunc.patch || true
-
-#       - name: Skip if no diff
-#         id: guard
-#         shell: bash
-#         run: |
-#           if [ ! -s diff.trunc.patch ]; then
-#             echo "No ABAP diff. Skipping review."
-#             echo "skip=true" >> "$GITHUB_OUTPUT"
-#           fi
-
-#       - name: Call n8n Webhook
-#         if: steps.guard.outputs.skip != 'true'
-#         env:
-#           N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
-#         shell: bash
-#         run: |
-#           set -euo pipefail
-          
-#           # n8n Webhook URLの確認
-#           [ -n "${N8N_WEBHOOK_URL:-}" ] || { echo "ERROR: N8N_WEBHOOK_URL is empty."; exit 1; }
-
-#           # リクエストボディの作成
-#           BODY=$(jq -n \
-#             --arg diff  "$(cat diff.trunc.patch)" \
-#             --arg repo  "${{ github.repository }}" \
-#             --arg pr    "${{ github.event.number }}" \
-#             --arg author "${{ github.actor }}" \
-#             --arg title  "${{ github.event.pull_request.title }}" \
-#             --arg body   "${{ github.event.pull_request.body }}" \
-#             '{
-#                repository: $repo,
-#                pull_request: ($pr|tonumber),
-#                diff: $diff,
-#                author: $author,
-#                title: $title,
-#                body: $body,
-#                changed_files: []
-#              }')
-
-#           # n8nへのリクエスト送信
-#           RESP=$(curl -sS -L -w "\n%{http_code}" \
-#             -H "Content-Type: application/json" \
-#             -d "$BODY" \
-#             "$N8N_WEBHOOK_URL" || true)
-
-#           HTTP_CODE=$(echo "$RESP" | tail -n1)
-#           RESPONSE=$(echo "$RESP" | sed '$d')
-          
-#           # レスポンスの確認
-#           if ! echo "$HTTP_CODE" | grep -qE '^2[0-9][0-9]$'; then
-#             echo "n8n webhook error (HTTP $HTTP_CODE):"
-#             echo "$RESPONSE"
-#             exit 1
-#           else
-#             echo "n8n webhook succeeded (HTTP $HTTP_CODE)"
-#             echo "$RESPONSE"
-#           fi
-
-#       # 成功時のサマリー
-#       - name: Add summary
-#         if: steps.guard.outputs.skip != 'true'
-#         shell: bash
-#         run: |
-#           {
-#             echo "### ✅ ABAP AI Review Completed"
-#             echo
-#             echo "- **Repository**: ${{ github.repository }}"
-#             echo "- **PR**: #${{ github.event.number }}"
-#             echo "- **Author**: ${{ github.actor }}"
-#             echo "- **Review System**: n8n + Gemini AI"
-#             echo
-#             echo "レビューコメントがPRに投稿されました。"
-#           } >> "$GITHUB_STEP_SUMMARY"
-
 name: ABAP AI Review (n8n)
-
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -128,15 +8,12 @@ on:
       - '**/*.clas.abap'
       - '**/*.intf.abap'
       - '**/*.incl.abap'
-
 permissions:
   contents: read
   pull-requests: write
   issues: write
-
 env:
   DIFF_MAX_BYTES: "120000"
-
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -146,13 +23,25 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-
+      
       - name: Setup jq
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq
-
+      
+      # デバッグ: 変更されたファイルを確認
+      - name: Debug - List changed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          echo "=== All changed files ==="
+          git diff --name-only "$BASE..$HEAD" || true
+          echo "=== ABAP-like files ==="
+          git diff --name-only "$BASE..$HEAD" | grep -E '\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$' || echo "No ABAP files found"
+      
       - name: Collect ABAP diff
         id: diff
         shell: bash
@@ -160,24 +49,53 @@ jobs:
           set -euo pipefail
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
-
+          
           # 念のため両端を取得
           git fetch --no-tags --depth=200 origin "$BASE" "$HEAD" || true
-
-          # ★ 二点比較（..）で確実に差分を取る
-          git diff --unified=0 "$BASE..$HEAD" \
-            -- '**/*.abap' '**/*.prog.abap' '**/*.clas.abap' '**/*.intf.abap' '**/*.incl.abap' \
-            > diff.patch || true
-
+          
+          # より柔軟なパスマッチングを試行
+          echo "=== Trying git diff with various patterns ==="
+          
+          # パターン1: 基本のglobパターン
+          git diff --unified=0 --name-only "$BASE..$HEAD" \
+            -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' \
+               '*/*.abap' '*/*.prog.abap' '*/*.clas.abap' '*/*.intf.abap' '*/*.incl.abap' \
+               '*/*/*.abap' '*/*/*.prog.abap' '*/*/*.clas.abap' '*/*/*.intf.abap' '*/*/*.incl.abap' || true
+          
+          # パターン2: すべてのファイルから後でフィルタ
+          git diff --unified=0 "$BASE..$HEAD" > all_diff.patch || true
+          grep -E '^\+\+\+ b/.*\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$' all_diff.patch || echo "No ABAP file headers found"
+          
+          # 実際の差分を取得（改良版）
+          git diff --unified=0 "$BASE..$HEAD" | \
+            awk '
+            /^\+\+\+ b\/.*\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$/ { abap_file=1; print; next }
+            /^\+\+\+ / { abap_file=0 }
+            abap_file { print }
+            /^diff --git/ && /\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap) / { print }
+            ' > diff.patch || true
+          
           head -c "${DIFF_MAX_BYTES}" diff.patch > diff.trunc.patch || true
-
+          
+          echo "=== Generated diff size ==="
+          wc -c diff.trunc.patch || true
+          echo "=== First few lines of diff ==="
+          head -10 diff.trunc.patch || true
+          
           if [[ -s diff.trunc.patch ]]; then
             echo "has_diff=true" >> "$GITHUB_OUTPUT"
             { echo "patch<<EOF"; cat diff.trunc.patch; echo "EOF"; } >> "$GITHUB_OUTPUT"
+            echo "✅ ABAP diff found and processed"
           else
             echo "has_diff=false" >> "$GITHUB_OUTPUT"
+            echo "❌ No ABAP diff found"
           fi
-
+      
+      - name: Skip if no diff
+        if: steps.diff.outputs.has_diff != 'true'
+        run: |
+          echo "No ABAP diff. Skipping review."
+      
       - name: Call n8n Webhook
         if: steps.diff.outputs.has_diff == 'true'
         env:
@@ -186,7 +104,9 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${N8N_WEBHOOK_URL:-}" ] || { echo "ERROR: N8N_WEBHOOK_URL is empty."; exit 1; }
-
+          
+          echo "🚀 Calling n8n webhook..."
+          
           BODY=$(jq -n \
             --arg diff  "${{ steps.diff.outputs.patch }}" \
             --arg repo  "${{ github.repository }}" \
@@ -202,24 +122,24 @@ jobs:
                title: $title,
                body: $prbody
              }')
-
+          
           RESP=$(curl -sS -L -w "\n%{http_code}" \
             -H "Content-Type: application/json" \
             -d "$BODY" \
             "$N8N_WEBHOOK_URL" || true)
-
+          
           CODE=$(echo "$RESP" | tail -n1)
           PAYL=$(echo "$RESP" | sed '$d')
-
+          
           if ! echo "$CODE" | grep -qE '^2[0-9][0-9]$'; then
-            echo "n8n webhook error (HTTP $CODE):"
+            echo "❌ n8n webhook error (HTTP $CODE):"
             echo "$PAYL"
             exit 1
           else
-            echo "n8n webhook succeeded (HTTP $CODE)"
+            echo "✅ n8n webhook succeeded (HTTP $CODE)"
             echo "$PAYL"
           fi
-
+      
       - name: Add summary
         if: steps.diff.outputs.has_diff == 'true'
         run: |
