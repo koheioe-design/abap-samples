@@ -1,13 +1,7 @@
-name: ABAP AI Review (n8n)
+name: ABAP AI Review (n8n) - Debug
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - '**/*.abap'
-      - '**/*.prog.abap'
-      - '**/*.clas.abap'
-      - '**/*.intf.abap'
-      - '**/*.incl.abap'
 permissions:
   contents: read
   pull-requests: write
@@ -18,7 +12,6 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      # ★ PR の head を明示して checkout（merge commit を使わない）
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -30,19 +23,48 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
       
-      # デバッグ: 変更されたファイルを確認
-      - name: Debug - List changed files
+      # 完全なデバッグ情報を収集
+      - name: Complete Debug Info
         shell: bash
         run: |
           set -euo pipefail
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
-          echo "=== All changed files ==="
+          
+          echo "=== PR Information ==="
+          echo "Base: $BASE"
+          echo "Head: $HEAD"
+          echo "Repository: ${{ github.repository }}"
+          echo "PR Number: ${{ github.event.number }}"
+          
+          echo ""
+          echo "=== ALL Changed Files ==="
           git diff --name-only "$BASE..$HEAD" || true
-          echo "=== ABAP-like files ==="
-          git diff --name-only "$BASE..$HEAD" | grep -E '\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$' || echo "No ABAP files found"
+          
+          echo ""
+          echo "=== Files with Extensions ==="
+          git diff --name-only "$BASE..$HEAD" | while read file; do
+            if [[ -n "$file" ]]; then
+              echo "File: $file"
+              echo "  Extension: ${file##*.}"
+              echo "  Full name check: $(echo "$file" | grep -E '\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$' || echo 'Not ABAP')"
+            fi
+          done || true
+          
+          echo ""
+          echo "=== Raw diff output (first 50 lines) ==="
+          git diff "$BASE..$HEAD" | head -50 || true
+          
+          echo ""
+          echo "=== Checking for any .abap files ==="
+          find . -name "*.abap" -type f | head -10 || echo "No .abap files found in repository"
+          
+          echo ""
+          echo "=== Directory structure sample ==="
+          find . -type f | head -20 || true
       
-      - name: Collect ABAP diff
+      # 条件を緩和して差分を取得
+      - name: Collect ANY diff (for testing)
         id: diff
         shell: bash
         run: |
@@ -50,104 +72,84 @@ jobs:
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
           
-          # 念のため両端を取得
-          git fetch --no-tags --depth=200 origin "$BASE" "$HEAD" || true
-          
-          # より柔軟なパスマッチングを試行
-          echo "=== Trying git diff with various patterns ==="
-          
-          # パターン1: 基本のglobパターン
-          git diff --unified=0 --name-only "$BASE..$HEAD" \
-            -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' \
-               '*/*.abap' '*/*.prog.abap' '*/*.clas.abap' '*/*.intf.abap' '*/*.incl.abap' \
-               '*/*/*.abap' '*/*/*.prog.abap' '*/*/*.clas.abap' '*/*/*.intf.abap' '*/*/*.incl.abap' || true
-          
-          # パターン2: すべてのファイルから後でフィルタ
+          # とりあえず何か変更があるかチェック
           git diff --unified=0 "$BASE..$HEAD" > all_diff.patch || true
-          grep -E '^\+\+\+ b/.*\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$' all_diff.patch || echo "No ABAP file headers found"
           
-          # 実際の差分を取得（改良版）
-          git diff --unified=0 "$BASE..$HEAD" | \
-            awk '
-            /^\+\+\+ b\/.*\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$/ { abap_file=1; print; next }
-            /^\+\+\+ / { abap_file=0 }
-            abap_file { print }
-            /^diff --git/ && /\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap) / { print }
-            ' > diff.patch || true
-          
-          head -c "${DIFF_MAX_BYTES}" diff.patch > diff.trunc.patch || true
-          
-          echo "=== Generated diff size ==="
-          wc -c diff.trunc.patch || true
-          echo "=== First few lines of diff ==="
-          head -10 diff.trunc.patch || true
-          
-          if [[ -s diff.trunc.patch ]]; then
+          if [[ -s all_diff.patch ]]; then
+            echo "=== Found general diff ==="
             echo "has_diff=true" >> "$GITHUB_OUTPUT"
+            head -c "${DIFF_MAX_BYTES}" all_diff.patch > diff.trunc.patch
             { echo "patch<<EOF"; cat diff.trunc.patch; echo "EOF"; } >> "$GITHUB_OUTPUT"
-            echo "✅ ABAP diff found and processed"
+            echo "✅ General diff found (will check for ABAP content)"
+            
+            # ABAP関連の変更があるかチェック
+            if git diff --name-only "$BASE..$HEAD" | grep -qE '\.(abap|prog\.abap|clas\.abap|intf\.abap|incl\.abap)$'; then
+              echo "🎯 ABAP files detected in changes"
+            else
+              echo "⚠️ No ABAP files in changes, but proceeding for debug"
+            fi
           else
             echo "has_diff=false" >> "$GITHUB_OUTPUT"
-            echo "❌ No ABAP diff found"
+            echo "❌ No diff found at all"
           fi
       
-      - name: Skip if no diff
-        if: steps.diff.outputs.has_diff != 'true'
-        run: |
-          echo "No ABAP diff. Skipping review."
-      
-      - name: Call n8n Webhook
+      - name: Test n8n Webhook (if any diff)
         if: steps.diff.outputs.has_diff == 'true'
         env:
           N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
         shell: bash
         run: |
           set -euo pipefail
-          [ -n "${N8N_WEBHOOK_URL:-}" ] || { echo "ERROR: N8N_WEBHOOK_URL is empty."; exit 1; }
           
-          echo "🚀 Calling n8n webhook..."
+          echo "🧪 Testing n8n webhook connection..."
           
+          # Webhook URLの確認
+          if [[ -z "${N8N_WEBHOOK_URL:-}" ]]; then
+            echo "❌ ERROR: N8N_WEBHOOK_URL is not set in secrets"
+            exit 1
+          fi
+          
+          echo "✅ Webhook URL is configured"
+          echo "URL pattern: $(echo "$N8N_WEBHOOK_URL" | sed 's/[^/]*$/***/')"
+          
+          # テスト用の簡単なペイロード
           BODY=$(jq -n \
-            --arg diff  "${{ steps.diff.outputs.patch }}" \
             --arg repo  "${{ github.repository }}" \
             --arg pr    "${{ github.event.number }}" \
-            --arg author "${{ github.actor }}" \
-            --arg title  "${{ github.event.pull_request.title }}" \
-            --arg prbody "${{ github.event.pull_request.body }}" \
+            --arg test  "debug-run" \
             '{
                repository: $repo,
                pull_request: ($pr|tonumber),
-               diff: $diff,
-               author: $author,
-               title: $title,
-               body: $prbody
+               test_mode: true,
+               message: "Testing webhook connectivity"
              }')
           
+          echo "📤 Sending test payload..."
+          
+          # Webhook呼び出し
           RESP=$(curl -sS -L -w "\n%{http_code}" \
             -H "Content-Type: application/json" \
+            -H "User-Agent: GitHub-Actions" \
+            --max-time 30 \
             -d "$BODY" \
-            "$N8N_WEBHOOK_URL" || true)
+            "$N8N_WEBHOOK_URL" || echo -e "\nERROR")
           
           CODE=$(echo "$RESP" | tail -n1)
           PAYL=$(echo "$RESP" | sed '$d')
           
-          if ! echo "$CODE" | grep -qE '^2[0-9][0-9]$'; then
-            echo "❌ n8n webhook error (HTTP $CODE):"
-            echo "$PAYL"
+          echo "📥 Response received:"
+          echo "HTTP Code: $CODE"
+          echo "Payload: $PAYL"
+          
+          if [[ "$CODE" == "ERROR" ]]; then
+            echo "❌ Connection failed - check n8n webhook URL and n8n service status"
             exit 1
+          elif echo "$CODE" | grep -qE '^2[0-9][0-9]$'; then
+            echo "✅ n8n webhook test successful!"
           else
-            echo "✅ n8n webhook succeeded (HTTP $CODE)"
-            echo "$PAYL"
+            echo "⚠️ n8n responded with HTTP $CODE"
+            echo "This might still work - check n8n workflow logs"
           fi
       
-      - name: Add summary
-        if: steps.diff.outputs.has_diff == 'true'
-        run: |
-          {
-            echo "### ✅ ABAP AI Review Completed"
-            echo
-            echo "- **Repository**: ${{ github.repository }}"
-            echo "- **PR**: #${{ github.event.number }}"
-            echo "- **Author**: ${{ github.actor }}"
-            echo "- **Review System**: n8n + Gemini AI"
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Summary
+        if: always
